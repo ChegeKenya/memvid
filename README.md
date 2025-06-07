@@ -89,7 +89,7 @@ pip install PyPDF2
 
 You can easily try Memvid with GPU acceleration for faster embedding and indexing using our Google Colab notebook. This is a great way to test the capabilities of Memvid without any local setup.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/featuregraph/memvid/blob/main/memvid_colab_gpu.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/olow304/memvid/blob/main/memvid_colab_gpu.ipynb)
 
 **Instructions:**
 
