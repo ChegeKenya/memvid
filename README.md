@@ -85,6 +85,25 @@ pip install memvid
 pip install PyPDF2
 ```
 
+## 🚀 Try Memvid on Colab (with GPU)
+
+You can easily try Memvid with GPU acceleration for faster embedding and indexing using our Google Colab notebook. This is a great way to test the capabilities of Memvid without any local setup.
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/featuregraph/memvid/blob/main/memvid_colab_gpu.ipynb)
+
+**Instructions:**
+
+1.  Click the "Open In Colab" badge above to open the notebook.
+2.  In Colab, ensure you have a GPU runtime selected:
+    *   Go to `Runtime` > `Change runtime type`.
+    *   Select `GPU` from the `Hardware accelerator` dropdown menu and click `Save`.
+3.  Run the notebook cells sequentially from top to bottom.
+4.  **Provide your data**: Look for the cell titled "Provide Your Text Data" and replace the example text with your own.
+5.  **Set up LLM API Key (Optional)**: If you want to use LLM-powered chat responses, find the cell "Set Up LLM API Key" and follow the instructions to add your API key using Colab's secret manager.
+6.  Explore the examples for building video memory and querying it.
+
+The notebook is pre-configured to use available GPU resources for FAISS indexing and Sentence Transformer embeddings.
+
 ## 🎯 Quick Start
 
 ### Basic Usage
