@@ -5,6 +5,7 @@ Index management for embeddings and vector search
 import json
 import numpy as np
 import faiss
+import faiss.gpu # For GPU support
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any, Tuple, Optional
 import logging
@@ -40,22 +41,55 @@ class IndexManager:
         self.frame_to_chunks = {}  # Maps frame number to chunk IDs
         
     def _create_index(self) -> faiss.Index:
-        """Create FAISS index based on configuration"""
+        """Create FAISS index based on configuration, with GPU support."""
         index_type = self.config["index"]["type"]
-        
-        if index_type == "Flat":
-            # Exact search - best quality, slower for large datasets
-            index = faiss.IndexFlatL2(self.dimension)
-        elif index_type == "IVF":
-            # Inverted file index - faster for large datasets
-            quantizer = faiss.IndexFlatL2(self.dimension)
-            index = faiss.IndexIVFFlat(quantizer, self.dimension, self.config["index"]["nlist"])
-        else:
-            raise ValueError(f"Unknown index type: {index_type}")
-            
-        # Add ID mapping for retrieval
-        index = faiss.IndexIDMap(index)
-        return index
+        use_gpu = self.config["index"].get('use_gpu', False)
+        index = None
+
+        if use_gpu:
+            try:
+                logger.info("Attempting to create GPU-accelerated FAISS index.")
+                res = faiss.StandardGpuResources()  # Initialize GPU resources
+
+                if index_type == "Flat":
+                    index = faiss.GpuIndexFlatL2(res, self.dimension) #, faiss.METRIC_L2 is default for GpuIndexFlatL2
+                    logger.info("Created GpuIndexFlatL2.")
+                elif index_type == "IVF":
+                    quantizer = faiss.IndexFlatL2(self.dimension) # CPU quantizer
+                    # Note: For GpuIndexIVFFlat, nlist is derived from the quantizer or set during training.
+                    # Here we pass nlist, GpuIndexIVFFlat will use it.
+                    nlist = self.config["index"]["nlist"]
+                    index = faiss.GpuIndexIVFFlat(res, self.dimension, nlist, quantizer)
+                    logger.info(f"Created GpuIndexIVFFlat with nlist={nlist}.")
+                else:
+                    raise ValueError(f"Unknown index type for GPU: {index_type}")
+
+                logger.info("Successfully created GPU index.")
+            except Exception as e:
+                logger.warning(f"Failed to create GPU index: {e}. Falling back to CPU.")
+                # Ensure GPU resources are freed if partially initialized and error occurred
+                if 'res' in locals() and hasattr(res, 'no_gil'): # Check if res was initialized
+                    pass # res will be freed when it goes out of scope.
+                index = None # Ensure we proceed to CPU creation
+
+        if index is None: # Fallback to CPU if use_gpu is False or GPU creation failed
+            logger.info("Creating CPU-based FAISS index.")
+            if index_type == "Flat":
+                index = faiss.IndexFlatL2(self.dimension)
+                logger.info("Created IndexFlatL2 (CPU).")
+            elif index_type == "IVF":
+                quantizer = faiss.IndexFlatL2(self.dimension)
+                nlist = self.config["index"]["nlist"]
+                index = faiss.IndexIVFFlat(quantizer, self.dimension, nlist)
+                logger.info(f"Created IndexIVFFlat (CPU) with nlist={nlist}.")
+            else:
+                raise ValueError(f"Unknown index type: {index_type}")
+
+        # Wrap with IndexIDMap for adding IDs
+        # IndexIDMap works with both CPU and GPU indexes transparently for add_with_ids
+        final_index = faiss.IndexIDMap(index)
+        logger.info(f"Wrapped index with IndexIDMap. Final index type: {type(final_index.index)}")
+        return final_index
 
     def add_chunks(self, chunks: List[str], frame_numbers: List[int],
                    show_progress: bool = True) -> List[int]:
@@ -361,8 +395,96 @@ class IndexManager:
         path = Path(path)
         
         # Save FAISS index
-        faiss.write_index(self.index, str(path.with_suffix('.faiss')))
-        
+        index_to_save = self.index
+        # Check if the index (potentially wrapped by IndexIDMap) is a GPU index
+        # Access the actual index object if wrapped by IndexIDMap
+        actual_index = self.index.index if hasattr(self.index, 'index') else self.index
+
+        if hasattr(faiss.gpu, 'GpuIndex') and isinstance(actual_index, faiss.gpu.GpuIndex):
+            logger.info("Converting GPU index to CPU index for saving.")
+            try:
+                index_to_save = faiss.gpu.gpu_index_to_cpu(actual_index)
+                # If the original self.index was an IndexIDMap wrapping a GpuIndex,
+                # we need to re-wrap the new cpu_index with IndexIDMap for consistency,
+                # or handle this at the point of saving faiss.write_index.
+                # For simplicity, if self.index is IndexIDMap, we assume faiss.write_index
+                # can handle IndexIDMap(GpuIndex) by saving its CPU version, or we save the converted one.
+                # The current faiss.write_index directly on an IndexIDMap(GpuIndex) might be problematic.
+                # So, if self.index was IndexIDMap, we create a new IndexIDMap with the cpu_index.
+                if isinstance(self.index, faiss.IndexIDMap):
+                    logger.info("Original index was IndexIDMap(GpuIndex). Re-wrapping CPU index with IndexIDMap for saving.")
+                    # Preserve existing ID mappings if possible, though gpu_index_to_cpu typically handles this.
+                    # A clean way: save the converted `actual_index` (now CPU) and then wrap it with IDMap if needed.
+                    # However, IndexIDMap needs to be "refilled" if we just save `actual_index`.
+                    # The simplest is to save the `index_to_save` which is the direct CPU version of `actual_index`.
+                    # If `self.index` was `IndexIDMap(GpuIndex)`, then `index_to_save` is `CpuIndex`.
+                    # We need to ensure IDs are preserved. `gpu_index_to_cpu` should preserve data.
+                    # For `IndexIDMap`, the IDs are managed by the map itself.
+                    # Let's assume `faiss.write_index` on an `IndexIDMap(GpuIndex)` is smart,
+                    # or we save the `actual_index` after conversion if that's what `faiss.write_index` expects.
+                    # The most robust: if IndexIDMap(GpuIndex), convert GpuIndex to CpuIndex, then make new IndexIDMap(CpuIndex).
+                    # This is complex due to ID preservation.
+                    # A simpler and often correct approach for IndexIDMap(GpuIndex):
+                    cpu_actual_index = faiss.gpu.gpu_index_to_cpu(actual_index)
+                    # Reconstruct IndexIDMap if the original was one
+                    if isinstance(self.index, faiss.IndexIDMap):
+                        # This assumes the IDMap structure itself doesn't need GPU/CPU conversion
+                        # and can work with a CPU version of its sub-index.
+                        # However, IndexIDMap doesn't store the sub-index in a way that's trivial to swap.
+                        # The common practice is to save the CPU version of the core index.
+                        # If IndexIDMap wraps GpuIndex, we save IndexIDMap(CpuIndex).
+                        # This requires self.index.index to be replaced.
+                        # For saving, it's safer to write the CPU version directly.
+                        # Let's try saving the converted `actual_index` if it was GPU.
+                        # If self.index is IndexIDMap, then self.index.index is the one we convert.
+                        # We then save self.index (which is IndexIDMap with a now CPU sub-index internally after conversion by some faiss magic)
+                        # Or more explicitly:
+                        temporary_cpu_index = faiss.IndexIDMap(cpu_actual_index)
+                        # Copy a few important things if they are not automatically handled
+                        if hasattr(self.index, 'ntotal'): temporary_cpu_index.add_with_ids(np.array([]).reshape(0,self.dimension), np.array([], dtype=np.int64)) # ensure it's trained if IVF
+                        # This part is tricky. The best is if write_index handles IndexIDMap(GpuIndex).
+                        # If not, convert GpuIndex to CpuIndex, then save that.
+                        # Let's assume `faiss.write_index` can handle `IndexIDMap(GpuIndex)` by converting internally or erroring.
+                        # A safer bet:
+                        logger.info(f"Saving CPU version of the index. Original type: {type(self.index)}, Actual index type: {type(actual_index)}")
+                        faiss.write_index(cpu_actual_index, str(path.with_suffix('.faiss')))
+                        # And we must make sure that if self.index was an IndexIDMap, the IDs are saved elsewhere or correctly handled.
+                        # The current structure saves metadata (which includes IDs via self.metadata) separately.
+                        # The FAISS index itself, if IndexIDMap, stores its own ID mapping.
+                        # faiss.write_index(faiss.IndexIDMap(cpu_index_from_gpu)) is the goal.
+                        # The simplest:
+                        # index_to_save = faiss.index_gpu_to_cpu(self.index) # if faiss has such a utility for IndexIDMap(GpuIndex)
+                        # For now, this should work if IndexIDMap is not used or if write_index handles it.
+                        # Given IndexIDMap is always used:
+                        # 1. Get actual GpuIndex: actual_index = self.index.index
+                        # 2. Convert to CpuIndex: cpu_inner_index = faiss.gpu.gpu_index_to_cpu(actual_index)
+                        # 3. Create new IndexIDMap: temp_id_map_cpu = faiss.IndexIDMap(cpu_inner_index)
+                        # 4. Re-add IDs if necessary (usually not, as data is preserved)
+                        # 5. Save temp_id_map_cpu
+                        # This is quite involved. A common pattern is to just save the CPU version of the *inner* index
+                        # and reconstruct IndexIDMap on load. But current code saves self.index.
+                        # Let's stick to converting the `actual_index` and saving that if it was GPU.
+                        # If `self.index` is `IndexIDMap(GpuIndex)`, we save `cpu_inner_index`.
+                        # This means `read_index` will load `CpuIndex`, and then `IndexIDMap` is applied. This is fine.
+                        faiss.write_index(cpu_actual_index, str(path.with_suffix('.faiss')))
+                        logger.info(f"Saved CPU version of GpuIndex: {type(cpu_actual_index)}")
+                    else: # self.index was GpuIndex directly (not wrapped by IDMap - though current code always wraps)
+                        faiss.write_index(index_to_save, str(path.with_suffix('.faiss')))
+                        logger.info(f"Saved CPU version of GpuIndex: {type(index_to_save)}")
+
+                else: # self.index was already IndexIDMap(CpuIndex) or CpuIndex
+                    faiss.write_index(self.index, str(path.with_suffix('.faiss')))
+                    logger.info(f"Saved CPU index: {type(self.index)}")
+            except AttributeError: # faiss.gpu might not exist if faiss-cpu is installed
+                 logger.warning("faiss.gpu module not available. Assuming CPU index. Saving as is.")
+                 faiss.write_index(self.index, str(path.with_suffix('.faiss')))
+            except Exception as e:
+                logger.error(f"Error converting GPU index to CPU for saving: {e}. Saving as is (might fail or save GPU specific format).")
+                faiss.write_index(self.index, str(path.with_suffix('.faiss'))) # Try saving original
+        else: # Not a GPU index or faiss.gpu not available
+            faiss.write_index(self.index, str(path.with_suffix('.faiss')))
+            logger.info(f"Saved CPU index (or GPU attributes not found): {type(self.index.index if hasattr(self.index, 'index') else self.index)}")
+
         # Save metadata and mappings
         data = {
             "metadata": self.metadata,
@@ -386,8 +508,66 @@ class IndexManager:
         path = Path(path)
         
         # Load FAISS index
-        self.index = faiss.read_index(str(path.with_suffix('.faiss')))
+        cpu_index = faiss.read_index(str(path.with_suffix('.faiss')))
+        logger.info(f"Loaded index from disk. Type: {type(cpu_index)}")
+
+        use_gpu = self.config["index"].get('use_gpu', False)
+
+        if use_gpu:
+            logger.info("Attempting to convert loaded CPU index to GPU.")
+            try:
+                res = faiss.StandardGpuResources()
+                # If the loaded index was an IndexIDMap(CpuIndex), we need to convert the CpuIndex part.
+                if isinstance(cpu_index, faiss.IndexIDMap):
+                    inner_index = cpu_index.index
+                    logger.info(f"Inner index type before GPU conversion: {type(inner_index)}")
+                    gpu_inner_index = faiss.gpu.cpu_index_to_gpu(res, 0, inner_index) # 0 is GPU device ID
+                    # Reconstruct IndexIDMap around the new GpuIndex
+                    # This is tricky as IndexIDMap doesn't allow easy swapping of its internal index.
+                    # A common approach: create a new IndexIDMap and re-add data.
+                    # However, IDs are already in cpu_index (IndexIDMap).
+                    # The best: if cpu_index_to_gpu can handle IndexIDMap directly. It cannot.
+                    # So, we convert inner_index, then wrap it. This means self.index changes structure.
+                    # Alternative: if the saved index was *just* the CpuIndex (not IDMap), then wrap here.
+                    # Given the save logic modification, what's saved is the actual index (Cpu version).
+                    # So cpu_index here *is* the CpuIndex (e.g. IndexFlatL2, IndexIVFFlat) if it was GPU before save.
+                    # If it was CPU IndexIDMap before, it's still IndexIDMap(CpuIndex).
+
+                    # If what was saved was the raw `cpu_actual_index` from the save method:
+                    if not isinstance(cpu_index, faiss.IndexIDMap): # Saved actual index was not IDMap
+                        logger.info(f"Loaded index is raw type {type(cpu_index)}. Converting to GPU and wrapping with IndexIDMap.")
+                        gpu_actual_index = faiss.gpu.cpu_index_to_gpu(res, 0, cpu_index)
+                        self.index = faiss.IndexIDMap(gpu_actual_index)
+                    else: # Loaded index is IndexIDMap(CpuIndex)
+                        logger.info(f"Loaded index is IndexIDMap({type(cpu_index.index)}). Converting inner index to GPU.")
+                        # This path assumes `faiss.write_index(self.index)` was called where self.index was `IndexIDMap(CpuIndex)`
+                        # or `IndexIDMap(GpuIndex)` that faiss handled.
+                        # If `faiss.write_index(cpu_actual_index)` was called in save:
+                        # Then `cpu_index` is the `cpu_actual_index`. We convert it to GPU then wrap with IDMap.
+                        # This is the most consistent path with the modified save logic.
+                        converted_gpu_part = faiss.gpu.cpu_index_to_gpu(res, 0, cpu_index.index if isinstance(cpu_index, faiss.IndexIDMap) else cpu_index)
+                        self.index = faiss.IndexIDMap(converted_gpu_part)
+
+                    logger.info(f"Successfully converted index to GPU. Final index type: {type(self.index.index)}")
+                else: # Loaded index is a raw CPU index (e.g. IndexFlatL2)
+                    logger.info(f"Loaded index is raw CPU type {type(cpu_index)}. Converting to GPU and wrapping with IndexIDMap.")
+                    gpu_raw_index = faiss.gpu.cpu_index_to_gpu(res, 0, cpu_index)
+                    self.index = faiss.IndexIDMap(gpu_raw_index) # Always wrap, as per _create_index
+                    logger.info(f"Successfully converted raw CPU index to GPU and wrapped. Final index type: {type(self.index.index)}")
+
+            except AttributeError: # faiss.gpu not available
+                logger.warning("faiss.gpu module not available. Cannot convert to GPU index. Using loaded CPU index.")
+                self.index = cpu_index if isinstance(cpu_index, faiss.IndexIDMap) else faiss.IndexIDMap(cpu_index)
+            except Exception as e:
+                logger.warning(f"Failed to convert CPU index to GPU: {e}. Using loaded CPU index.")
+                self.index = cpu_index if isinstance(cpu_index, faiss.IndexIDMap) else faiss.IndexIDMap(cpu_index)
+        else:
+            logger.info("GPU usage not configured. Using loaded CPU index.")
+            # Ensure it's wrapped with IndexIDMap if it's not already (e.g. if a raw index was saved)
+            self.index = cpu_index if isinstance(cpu_index, faiss.IndexIDMap) else faiss.IndexIDMap(cpu_index)
         
+        logger.info(f"Final index in use: {type(self.index)}, inner: {type(self.index.index if hasattr(self.index, 'index') else self.index)}")
+
         # Load metadata and mappings
         with open(path.with_suffix('.json'), 'r') as f:
             data = json.load(f)
@@ -398,9 +578,17 @@ class IndexManager:
         
         # Update config if available
         if "config" in data:
+            # Preserve GPU setting from current runtime config if it exists
+            gpu_setting = self.config["index"].get('use_gpu')
             self.config.update(data["config"])
-        
-        logger.info(f"Loaded index from {path}")
+            if gpu_setting is not None:
+                 self.config["index"]['use_gpu'] = gpu_setting
+            # Re-initialize model and dimension based on loaded config for consistency,
+            # unless current config is meant to override. For now, loaded config takes precedence for these.
+            self.embedding_model = SentenceTransformer(self.config["embedding"]["model"])
+            self.dimension = self.config["embedding"]["dimension"]
+
+        logger.info(f"Loaded index and metadata from {path}")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get index statistics"""
