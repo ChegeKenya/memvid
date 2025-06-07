@@ -89,7 +89,7 @@ pip install PyPDF2
 
 You can easily try Memvid with GPU acceleration for faster embedding and indexing using our Google Colab notebook. This is a great way to test the capabilities of Memvid without any local setup.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/olow304/memvid/blob/main/memvid_colab_gpu.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ChegeKenya/memvid/blob/main/memvid_colab_gpu.ipynb)
 
 **Instructions:**
 
@@ -327,16 +327,16 @@ Check out the [examples/](examples/) directory for:
 
 ## 🆘 Getting Help
 
-- 📖 [Documentation](https://github.com/olow304/memvid/wiki) - Comprehensive guides
-- 💬 [Discussions](https://github.com/olow304/memvid/discussions) - Ask questions
-- 🐛 [Issue Tracker](https://github.com/olow304/memvid/issues) - Report bugs
-- 🌟 [Show & Tell](https://github.com/olow304/memvid/discussions/categories/show-and-tell) - Share your projects
+- 📖 [Documentation](https://github.com/ChegeKenya/memvid/wiki) - Comprehensive guides
+- 💬 [Discussions](https://github.com/ChegeKenya/memvid/discussions) - Ask questions
+- 🐛 [Issue Tracker](https://github.com/ChegeKenya/memvid/issues) - Report bugs
+- 🌟 [Show & Tell](https://github.com/ChegeKenya/memvid/discussions/categories/show-and-tell) - Share your projects
 
 ## 🔗 Links
 
-- [GitHub Repository](https://github.com/olow304/memvid)
+- [GitHub Repository](https://github.com/ChegeKenya/memvid)
 - [PyPI Package](https://pypi.org/project/memvid)
-- [Changelog](https://github.com/olow304/memvid/releases)
+- [Changelog](https://github.com/ChegeKenya/memvid/releases)
 
 
 ## 📄 License
@@ -345,7 +345,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
-Created by [Olow304](https://github.com/olow304) and the Memvid community.
+Created by [ChegeKenya](https://github.com/ChegeKenya) and the Memvid community.
 
 Built with ❤️ using:
 - [sentence-transformers](https://www.sbert.net/) - State-of-the-art embeddings for semantic search
